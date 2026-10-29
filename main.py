@@ -36,7 +36,8 @@ BROWSER_HEADERS = {
     )
 }
 MAX_ITEMS = 10
-RECENT_HOURS = 336.0  # two weeks
+RECENT_HOURS = 336.0  # two weeks: nothing older is ever sent
+PAGE_ARTICLE_LIMIT = 20  # most articles opened to read their dates from the news page
 
 
 def safe(text):
@@ -101,6 +102,37 @@ def feed_articles(url, priority, now_utc, must_contain=None):
     return articles
 
 
+def parse_iso(text):
+    try:
+        moment = datetime.fromisoformat(text.strip().replace("Z", "+00:00"))
+    except Exception:
+        return None
+    return moment if moment.tzinfo else moment.replace(tzinfo=timezone.utc)
+
+
+def article_date(url):
+    """Opens one article and reads its publication date, or returns None."""
+    response = requests.get(url, headers=BROWSER_HEADERS, timeout=15)
+    response.raise_for_status()
+    soup = BeautifulSoup(response.text, "html.parser")
+    candidates = []
+    for attrs in ({"property": "article:published_time"}, {"property": "og:published_time"},
+                  {"itemprop": "datePublished"}, {"name": "date"}, {"name": "publish-date"}):
+        tag = soup.find("meta", attrs=attrs)
+        if tag and tag.get("content"):
+            candidates.append(tag["content"])
+    for tag in soup.find_all("time", attrs={"datetime": True}):
+        candidates.append(tag["datetime"])
+    match = re.search(r'"datePublished"\s*:\s*"([^"]+)"', response.text)
+    if match:
+        candidates.append(match.group(1))
+    for text in candidates:
+        moment = parse_iso(text)
+        if moment:
+            return moment
+    return None
+
+
 def fetch_primary_rotary_org(now_utc):
     """Official news from rotary.org: its news feed first, then its news page."""
     articles = []
@@ -115,7 +147,8 @@ def fetch_primary_rotary_org(now_utc):
                                 headers=BROWSER_HEADERS, timeout=20)
         if response.status_code == 200:
             soup = BeautifulSoup(response.text, "html.parser")
-            found = 0
+            known = {a["url"] for a in articles}  # the feed already gave these, with real dates
+            pending = {}
             for tag in soup.find_all("a", href=True):
                 if "/en/articles/" not in tag["href"]:
                     continue
@@ -123,15 +156,31 @@ def fetch_primary_rotary_org(now_utc):
                 if (not title or len(title) < 15
                         or title.lower() in ["read more", "news and stories", "all news and stories"]):
                     continue
+                url = clean_url(urljoin("https://www.rotary.org", tag["href"]))
+                if url not in known and url not in pending:
+                    pending[url] = title
+
+            found = no_date = 0
+            for url, title in list(pending.items())[:PAGE_ARTICLE_LIMIT]:
+                try:
+                    published = article_date(url)
+                except Exception as error:
+                    print(f"Could not open {url} ({type(error).__name__}).")
+                    published = None
+                if published is None:
+                    no_date += 1  # a story whose age cannot be proved is not used
+                    continue
+                hours_old = (now_utc - published).total_seconds() / 3600.0
                 articles.append({
                     "title": title,
-                    "url": clean_url(urljoin("https://www.rotary.org", tag["href"])),
-                    "published_at": now_utc - timedelta(days=1),
-                    "within_2_weeks": True,
+                    "url": url,
+                    "published_at": published,
+                    "within_2_weeks": hours_old <= RECENT_HOURS,
                     "priority": 1,
                 })
                 found += 1
-            print(f"rotary.org news page: {found} stories.")
+            print(f"rotary.org news page: {found} stories dated, {no_date} skipped "
+                  f"because no publication date could be read.")
         else:
             print(f"rotary.org news page answered {response.status_code}.")
     except Exception as error:
@@ -172,10 +221,8 @@ def get_top_stories():
     order = lambda x: (x["priority"], -x["published_at"].timestamp())
     recent.sort(key=order)
     older.sort(key=order)
-    chosen = recent[:MAX_ITEMS]
-    if len(chosen) < MAX_ITEMS:
-        chosen += older[:MAX_ITEMS - len(chosen)]
-    return chosen
+    print(f"Skipped as older than two weeks: {len(older)}")
+    return recent[:MAX_ITEMS]
 
 
 def build_message(articles):
