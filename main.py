@@ -32,8 +32,10 @@ CUSTOM_FOOTER = os.getenv(
 BROWSER_HEADERS = {
     "User-Agent": (
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-        "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
-    )
+        "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+    ),
+    "Accept": "application/rss+xml, application/xml, text/xml, text/html;q=0.9, */*;q=0.8",
+    "Accept-Language": "en-US,en;q=0.9",
 }
 MAX_ITEMS = 10
 RECENT_HOURS = 336.0  # two weeks: nothing older is ever sent
@@ -65,10 +67,24 @@ def clean_url(raw_url):
     return urlunparse((parsed.scheme, parsed.netloc, parsed.path, "", "", ""))
 
 
+def get_with_retry(url, attempts=2):
+    """Downloads with a time limit. A 429 answer means 'too many requests', so wait and retry once."""
+    response = None
+    for attempt in range(1, attempts + 1):
+        response = requests.get(url, headers=BROWSER_HEADERS, timeout=20)
+        if response.status_code != 429 or attempt == attempts:
+            break
+        wait = response.headers.get("Retry-After", "")
+        pause = int(wait) if wait.isdigit() and int(wait) <= 60 else 20
+        print(f"{url} answered 429. Waiting {pause} seconds, then trying again.")
+        time.sleep(pause)
+    return response
+
+
 def parse_feed(url):
-    """Downloads with a time limit, so a slow site cannot hang the run."""
-    response = requests.get(url, headers=BROWSER_HEADERS, timeout=20)
-    response.raise_for_status()
+    response = get_with_retry(url)
+    if response.status_code != 200:
+        raise RuntimeError(f"status {response.status_code} from {url}")
     return feedparser.parse(response.content)
 
 
@@ -112,7 +128,7 @@ def parse_iso(text):
 
 def article_date(url):
     """Opens one article and reads its publication date, or returns None."""
-    response = requests.get(url, headers=BROWSER_HEADERS, timeout=15)
+    response = get_with_retry(url)
     response.raise_for_status()
     soup = BeautifulSoup(response.text, "html.parser")
     candidates = []
@@ -143,8 +159,7 @@ def fetch_primary_rotary_org(now_utc):
         print(f"Error reading the rotary.org feed: {type(error).__name__}")
 
     try:
-        response = requests.get("https://www.rotary.org/en/news-and-stories",
-                                headers=BROWSER_HEADERS, timeout=20)
+        response = get_with_retry("https://www.rotary.org/en/news-and-stories")
         if response.status_code == 200:
             soup = BeautifulSoup(response.text, "html.parser")
             known = {a["url"] for a in articles}  # the feed already gave these, with real dates
@@ -190,16 +205,22 @@ def fetch_primary_rotary_org(now_utc):
 
 def fetch_secondary_rotary_feeds(now_utc):
     articles = []
-    for name, url, priority in (
-        ("Rotary Intercountry Committees", "https://rotary-icc.org/feed/", 2),
-        ("Rotary News Online", "https://rotarynewsonline.org/feed/", 3),
+    for name, urls, priority in (
+        ("Rotary Intercountry Committees",
+         ["https://rotary-icc.org/feed/", "https://rotary-icc.org/feed",
+          "https://rotary-icc.org/?feed=rss2"], 2),
+        ("Rotary News Online",
+         ["https://rotarynewsonline.org/feed/", "https://rotarynewsonline.org/feed",
+          "https://rotarynewsonline.org/?feed=rss2"], 3),
     ):
-        try:
-            found = feed_articles(url, priority, now_utc)
-            articles += found
-            print(f"{name}: {len(found)} stories.")
-        except Exception as error:
-            print(f"Error reading {name}: {type(error).__name__}")
+        for url in urls:  # the first address that works is used
+            try:
+                found = feed_articles(url, priority, now_utc)
+                articles += found
+                print(f"{name}: {len(found)} stories (from {url}).")
+                break
+            except Exception as error:
+                print(f"Error reading {name}: {safe(error)}")
     return articles
 
 
