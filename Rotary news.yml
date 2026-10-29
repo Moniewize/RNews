@@ -1,0 +1,33 @@
+name: Rotary News
+
+on:
+  workflow_dispatch:   # started by the cron-job.org timer; no schedule here on purpose
+
+permissions:
+  contents: read
+
+jobs:
+  send:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install packages
+        run: pip install requests feedparser beautifulsoup4
+
+      - name: Send Rotary news
+        run: python rotary_news.py
+        env:
+          PYTHONUNBUFFERED: "1"
+          PYTHONUTF8: "1"
+          GREEN_API_ID_INSTANCE: ${{ secrets.GREEN_API_ID_INSTANCE }}
+          GREEN_API_TOKEN: ${{ secrets.GREEN_API_TOKEN }}
+          GREEN_API_URL: ${{ secrets.GREEN_API_URL }}
+          PHONE_NUMBER: ${{ secrets.PHONE_NUMBER }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
