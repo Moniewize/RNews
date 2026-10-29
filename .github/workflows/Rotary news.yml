@@ -21,7 +21,7 @@ jobs:
         run: pip install requests feedparser beautifulsoup4
 
       - name: Send Rotary news
-        run: python rotary_news.py
+        run: main.py
         env:
           PYTHONUNBUFFERED: "1"
           PYTHONUTF8: "1"
